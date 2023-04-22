@@ -32,7 +32,7 @@ class Property<T extends Object> {
     this.autoDispose = false,
     this.resetOnDispose = false,
   }) {
-    controller = StreamController<PropertyEvent>.broadcast();
+    _controller = StreamController<PropertyEvent>.broadcast();
     _state = PropertyState.none;
   }
 
@@ -50,7 +50,7 @@ class Property<T extends Object> {
   final bool resetOnDispose;
 
   StreamSubscription? _streamSubscription;
-  late StreamController<PropertyEvent> controller;
+  late StreamController<PropertyEvent> _controller;
 
   bool get isNone => _value.isNone();
   bool get isSome => _value.isSome();
@@ -61,8 +61,8 @@ class Property<T extends Object> {
   StackTrace? get stackTrace => _stackTrace;
 
   void initController() {
-    if (controller.isClosed) {
-      controller = StreamController<PropertyEvent>.broadcast();
+    if (_controller.isClosed) {
+      _controller = StreamController<PropertyEvent>.broadcast();
     }
   }
 
@@ -70,7 +70,8 @@ class Property<T extends Object> {
     bool rebuild = true,
   }) {
     _value = const None();
-    rebuild ? controller.add(PropertyEvent.rebuild) : null;
+    _state = PropertyState.none;
+    rebuild ? _controller.add(PropertyEvent.rebuild) : null;
   }
 
   Future<void> _applyDebounce(
@@ -79,12 +80,12 @@ class Property<T extends Object> {
       void Function()? afterDebounce,
       FutureOr<Option<T>> Function(Option<T> value) updateAction) async {
     _state = PropertyState.debouncing;
-    controller.add(PropertyEvent.rebuild);
+    _controller.add(PropertyEvent.rebuild);
     _Debounce.debounce(
       id: hashCode,
       duration: debounceDuration,
       onExecute: () async {
-        await _updateInternal(updateAction);
+        _updateInternal(updateAction);
       },
       onDebounce: onDebounce,
       afterDebounce: afterDebounce,
@@ -99,12 +100,12 @@ class Property<T extends Object> {
       bool immediateTiming,
       FutureOr<Option<T>> Function(Option<T> value) updateAction) async {
     _state = PropertyState.throttled;
-    controller.add(PropertyEvent.rebuild);
+    _controller.add(PropertyEvent.rebuild);
     _Throttle.throttle(
       id: hashCode,
       duration: throttleDuration,
       onExecute: () async {
-        await _updateInternal(updateAction);
+        _updateInternal(updateAction);
       },
       beforeThrottle: beforeThrottle,
       onThrottle: onThrottle,
@@ -113,7 +114,7 @@ class Property<T extends Object> {
     );
   }
 
-  Future<void> update({
+  FutureOr<void> update({
     required FutureOr<Some<T>> Function(T value) ifSome,
     required FutureOr<Option<T>> Function() ifNone,
     Duration? debounceDuration,
@@ -124,8 +125,8 @@ class Property<T extends Object> {
     void Function()? onThrottle,
     void Function()? afterThrottle,
     bool immediateTiming = false,
-  }) async {
-    FutureOr<Option<T>> updateAction(Option<T> value) async {
+  }) {
+    FutureOr<Option<T>> updateAction(Option<T> value) {
       return value.match(
         () => ifNone(),
         (v) => ifSome(v),
@@ -133,37 +134,41 @@ class Property<T extends Object> {
     }
 
     if (debounceDuration != null) {
-      await _applyDebounce(
-          debounceDuration, onDebounce, afterDebounce, updateAction);
+      _applyDebounce(debounceDuration, onDebounce, afterDebounce, updateAction);
     } else if (throttleDuration != null) {
-      await _applyThrottle(throttleDuration, beforeThrottle, onThrottle,
+      _applyThrottle(throttleDuration, beforeThrottle, onThrottle,
           afterThrottle, immediateTiming, updateAction);
     } else {
-      await _updateInternal(updateAction);
+      _updateInternal(updateAction);
     }
   }
 
-  Future<void> _updateInternal(
+  FutureOr<void> _updateInternal(
     FutureOr<Option<T>> Function(Option<T> value) newValue,
-  ) async {
+  ) {
     try {
       _error = null;
       _stackTrace = null;
-      _state = PropertyState.waiting;
-      controller.add(PropertyEvent.rebuild);
+      if (value is Future<Option<T>>) {
+        _state = PropertyState.waiting;
+        _controller.add(PropertyEvent.rebuild);
+      }
       FutureOr<Option<T>> result = newValue.call(_value);
       if (result is Future<Option<T>>) {
-        _value = await result;
+        result.then((resolvedValue) {
+          _value = resolvedValue;
+          _updateState();
+          _controller.add(PropertyEvent.rebuild);
+        });
       } else {
         _value = result;
+        _updateState();
+        _controller.add(PropertyEvent.rebuild);
       }
-      _updateState();
-      controller.add(PropertyEvent.rebuild);
     } catch (error, stackTrace) {
       _state = PropertyState.error;
       _error = error;
       _stackTrace = stackTrace;
-      rethrow;
     }
   }
 
@@ -179,27 +184,32 @@ class Property<T extends Object> {
     }
   }
 
-  void subscribeToStream<E>(
-      {required Stream<E> stream, Function(E event)? onEvent}) {
-    _streamSubscription?.cancel();
-    _state = PropertyState.listening;
-    _streamSubscription = stream.listen((event) {
-      _state = PropertyState.some;
-      controller.add(PropertyEvent.rebuild);
-      onEvent?.call(event);
-    });
+  void subscribeToStream({required Stream<Option<T>> stream}) {
+    _streamSubscription = stream.listen(
+      (newValue) {
+        _value = newValue;
+        _updateState();
+        _controller.add(PropertyEvent.rebuild);
+      },
+      onError: (error, stackTrace) {
+        _state = PropertyState.error;
+        _error = error;
+        _stackTrace = stackTrace;
+        _controller.add(PropertyEvent.rebuild);
+      },
+    );
   }
 
   void pause() {
     _streamSubscription?.pause();
     _state = PropertyState.streamPaused;
-    controller.add(PropertyEvent.rebuild);
+    _controller.add(PropertyEvent.rebuild);
   }
 
   void resume() {
     _streamSubscription?.resume();
     _state = PropertyState.listening;
-    controller.add(PropertyEvent.rebuild);
+    _controller.add(PropertyEvent.rebuild);
   }
 
   int? get debounceRemainingTime {
@@ -218,7 +228,7 @@ class Property<T extends Object> {
 
   void dispose() {
     if (autoDispose) {
-      controller.close();
+      _controller.close();
     }
     if (autoDisposeSubscription) {
       _streamSubscription?.cancel();
@@ -322,70 +332,56 @@ class Property<T extends Object> {
   }
 
   void on({
-    required void Function(T value) onValue,
+    required void Function(T value) onSome,
     void Function()? onNone,
-    void Function(T value)? onWaiting,
+    void Function()? onWaiting,
     void Function()? onNull,
     void Function()? onEmptyList,
     void Function()? onEmptyMap,
-    void Function(T value)? onListening,
+    void Function()? onListening,
+    void Function(Option<T> event)? onStreamEvent,
+    void Function()? onStreamPaused,
     void Function(T value, Object error, StackTrace stackTrace)? onError,
-    void Function(T value)? onTimeout,
-    void Function(T value, int timeRemaining)? onDebounce,
-    void Function(T value, int timeRemaining)? onThrottle,
-    bool skipWaiting = false,
-    bool skipDebounce = false,
-    bool skipThrottle = false,
+    void Function()? onTimeout,
+    void Function(T value)? onDebounce,
+    void Function(T value)? onThrottle,
   }) {
-    PropertyState state = this.state;
-
-    switch (state) {
-      case PropertyState.some:
-        onValue(_value as T);
-        break;
-      case PropertyState.waiting:
-        if (!skipWaiting && onWaiting != null) {
-          onWaiting(_value as T);
+    _controller.stream.listen(
+      (event) {
+        switch (state) {
+          case PropertyState.some:
+            return value.match(
+                () => const Option.none(), (t) => onSome.call(t));
+          case PropertyState.none:
+            return onNone?.call();
+          case PropertyState.waiting:
+            return onWaiting?.call();
+          case PropertyState.emptyList:
+            return onEmptyList?.call();
+          case PropertyState.emptyMap:
+            return onEmptyMap?.call();
+          case PropertyState.listening:
+            return onListening?.call();
+          case PropertyState.streamEvent:
+            return onStreamEvent?.call(_value);
+          case PropertyState.streamPaused:
+            return onStreamPaused?.call();
+          case PropertyState.error:
+            return value.match(
+                () => const Option.none(),
+                (t) => onError?.call(t, _error ?? Object(),
+                    _stackTrace ?? StackTrace.fromString('')));
+          case PropertyState.timeout:
+            return onTimeout?.call();
+          case PropertyState.debouncing:
+            return value.match(
+                () => const Option.none(), (t) => onDebounce?.call(t));
+          case PropertyState.throttled:
+            return value.match(
+                () => const Option.none(), (t) => onThrottle?.call(t));
         }
-        break;
-      case PropertyState.debouncing:
-        if (!skipDebounce && onDebounce != null) {
-          onDebounce(_value as T, debounceRemainingTime!);
-        }
-        break;
-      case PropertyState.throttled:
-        if (!skipThrottle && onThrottle != null) {
-          onThrottle(_value as T, throttleRemainingTime!);
-        }
-        break;
-      case PropertyState.emptyList:
-        if (onEmptyList != null) {
-          onEmptyList.call();
-        }
-        break;
-      case PropertyState.emptyMap:
-        if (onEmptyMap != null) {
-          onEmptyMap.call();
-        }
-        break;
-      case PropertyState.listening:
-        if (onListening != null) {
-          onListening(_value as T);
-        }
-        break;
-      case PropertyState.error:
-        if (onError != null) {
-          onError(_value as T, _error!, _stackTrace!);
-        }
-        break;
-      case PropertyState.timeout:
-        if (onTimeout != null) {
-          onTimeout(_value as T);
-        }
-        break;
-      default:
-        break;
-    }
+      },
+    );
   }
 }
 
@@ -433,7 +429,7 @@ class PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
   @override
   void initState() {
     widget.property.initController();
-    _subscription = widget.property.controller.stream.listen((event) {
+    _subscription = widget.property._controller.stream.listen((event) {
       _onPropertyEvent(event);
     });
     super.initState();
@@ -445,7 +441,7 @@ class PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
     if (oldWidget.property != widget.property) {
       _subscription.cancel();
       widget.property.initController();
-      _subscription = widget.property.controller.stream.listen((event) {
+      _subscription = widget.property._controller.stream.listen((event) {
         _onPropertyEvent(event);
       });
     }
@@ -533,7 +529,7 @@ class PropertyBuilderState extends State<PropertyBuilder> {
   @override
   void initState() {
     _subscriptions = widget.properties.map((property) {
-      return property.controller.stream.listen((event) {
+      return property._controller.stream.listen((event) {
         setState(() {});
       });
     }).toList();
