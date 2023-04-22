@@ -1,52 +1,13 @@
-// Make your state flow like the rapids of a mighty
-// river and propell its pod from whence it came.
-//
-// Unveil the hidden treasure troves, marking X on the map.
-//
-// Introducing... GetRiverProviderX.
-//
-// Jokes aside...
-//
-// The Property class is used to manage state and values of a property
-// in Flutter. While the Property class itself manages its state and value,
-// it relies on PropertyWidget or PropertyBuilder to handle rebuilds in the
-// widget tree when its state changes.
-//
-// The value and state of a Property object are exposed as read-only properties,
-// preventing unexpected state changes and race conditions. The update method is
-// the primary way to update a Property object's state and value. However,
-// subscribeToStream, pause, and resume methods also modify the state of the Property.
-//
-// Using Property objects allows for greater flexibility and customizability,
-// as it decentralizes state management and reduces coupling to the API design.
-// PropertyWidget and PropertyBuilder make it easy to react to state changes and
-// build the widget tree accordingly.
-//
-// The Property class also provides additional methods for managing its behavior
-// and lifecycle, such as subscribeToStream, pause, resume, debounceRemainingTime,
-// throttleRemainingTime, and dispose.
-
-// PropertyWidget is a StatefulWidget that reacts to changes in a Property's state.
-// It uses various callbacks to handle different Property states and build the
-// widget tree accordingly. PropertyWidget relies on the state managed by the
-// Property class and ensures proper rebuilds when the state changes.
-
-// PropertyBuilder is a StatefulWidget that takes a list of Property objects and
-// a builder function. It rebuilds the widget tree whenever any of the Property
-// objects in the list update their state. PropertyBuilder enables handling multiple
-// Property objects in the same widget tree, ensuring that the widgets react to
-// state changes in all the provided properties.
 library property;
 
 import 'dart:async';
-
+import 'package:fpdart/fpdart.dart' hide State;
 import 'package:flutter/widgets.dart';
 
 enum PropertyState {
-  init,
-  value,
+  some,
+  none,
   waiting,
-  Null,
   emptyList,
   emptyMap,
   listening,
@@ -64,121 +25,53 @@ enum PropertyEvent {
 
 typedef DefaultValueSupplier<T> = T Function();
 
-abstract class Option<T> {
-  const Option();
-
-  bool get isSome;
-  bool get isNone;
-  T get value;
-
-  factory Option.some(T value) => Some(value);
-  factory Option.none() => const None();
-
-  R map<R>(R Function(T) mapper);
-
-  Option<U> flatMap<U>(Option<U> Function(T) f);
-
-  FutureOr<R> fold<R>({
-    required FutureOr<R> Function() ifNone,
-    required FutureOr<R> Function(T value) ifSome,
-  });
-
-  T getOrElse(T Function() defaultValue) {
-    return isSome ? value : defaultValue();
-  }
-
-  static Option<T> fromValue<T>(T value) =>
-      value == null ? Option.none() : Option.some(value);
-}
-
-class Some<T> extends Option<T> {
-  final T _value;
-
-  const Some(this._value) : super();
-
-  @override
-  bool get isSome => true;
-
-  @override
-  bool get isNone => false;
-
-  @override
-  T get value => _value;
-
-  @override
-  R map<R>(R Function(T) mapper) => mapper(_value);
-
-  @override
-  Option<U> flatMap<U>(Option<U> Function(T) f) {
-    return f(value);
-  }
-
-  @override
-  FutureOr<R> fold<R>({
-    required FutureOr<R> Function() ifNone,
-    required FutureOr<R> Function(T value) ifSome,
-  }) async =>
-      await ifSome(_value);
-}
-
-class None<T> extends Option<T> {
-  const None() : super();
-
-  @override
-  bool get isSome => false;
-
-  @override
-  bool get isNone => true;
-
-  @override
-  T get value => throw Exception('Cannot get value from None.');
-
-  @override
-  R map<R>(R Function(T) mapper) => throw Exception('Cannot map None.');
-
-  @override
-  Option<U> flatMap<U>(Option<U> Function(T) f) {
-    return None<U>();
-  }
-
-  @override
-  FutureOr<R> fold<R>({
-    required FutureOr<R> Function() ifNone,
-    required FutureOr<R> Function(T value) ifSome,
-  }) =>
-      ifNone();
-}
-
 class Property<T extends Object> {
   Property(
     this.init, {
     this.autoDisposeSubscription = false,
     this.autoDispose = false,
+    this.resetOnDispose = false,
   }) {
     controller = StreamController<PropertyEvent>.broadcast();
-    _state = PropertyState.init;
+    _state = PropertyState.none;
   }
 
+  Option<T> _value = Option<T>.none();
+
   DefaultValueSupplier<Option> init;
-  Option<T> _value = Option.none();
-  late StreamController<PropertyEvent> controller;
-  StreamSubscription? _streamSubscription;
-  late PropertyState _state;
+
   Object? _error;
   StackTrace? _stackTrace;
+
+  late PropertyState _state;
+
   final bool autoDispose;
   final bool autoDisposeSubscription;
-  AsyncSnapshot? _lastSnapshot;
+  final bool resetOnDispose;
 
-  bool get isNone => _value.isNone;
-  bool get isSome => _value.isSome;
+  StreamSubscription? _streamSubscription;
+  late StreamController<PropertyEvent> controller;
+
+  bool get isNone => _value.isNone();
+  bool get isSome => _value.isSome();
 
   Option<T> get value => _value;
   PropertyState get state => _state;
   Object? get error => _error;
   StackTrace? get stackTrace => _stackTrace;
 
-  T get _defaultValue => const None() as T;
+  void initController() {
+    if (controller.isClosed) {
+      controller = StreamController<PropertyEvent>.broadcast();
+    }
+  }
+
+  void resetToNone({
+    bool rebuild = true,
+  }) {
+    _value = const None();
+    rebuild ? controller.add(PropertyEvent.rebuild) : null;
+  }
 
   Future<void> _applyDebounce(
       Duration debounceDuration,
@@ -220,8 +113,9 @@ class Property<T extends Object> {
     );
   }
 
-  Future<void> update(
-    FutureOr<T> Function(Option<T> value) valueFn, {
+  Future<void> update({
+    required FutureOr<Some<T>> Function(T value) ifSome,
+    required FutureOr<Option<T>> Function() ifNone,
     Duration? debounceDuration,
     Duration? throttleDuration,
     void Function()? onDebounce,
@@ -232,8 +126,10 @@ class Property<T extends Object> {
     bool immediateTiming = false,
   }) async {
     FutureOr<Option<T>> updateAction(Option<T> value) async {
-      T result = await valueFn(value);
-      return Option.some(result);
+      return value.match(
+        () => ifNone(),
+        (v) => ifSome(v),
+      );
     }
 
     if (debounceDuration != null) {
@@ -273,13 +169,13 @@ class Property<T extends Object> {
 
   void _updateState() {
     if (_value is None) {
-      _state = PropertyState.Null;
+      _state = PropertyState.none;
     } else if (_value is List && (_value as List).isEmpty) {
       _state = PropertyState.emptyList;
     } else if (_value is Map && (_value as Map).isEmpty) {
       _state = PropertyState.emptyMap;
     } else {
-      _state = PropertyState.value;
+      _state = PropertyState.some;
     }
   }
 
@@ -288,7 +184,7 @@ class Property<T extends Object> {
     _streamSubscription?.cancel();
     _state = PropertyState.listening;
     _streamSubscription = stream.listen((event) {
-      _state = PropertyState.value;
+      _state = PropertyState.some;
       controller.add(PropertyEvent.rebuild);
       onEvent?.call(event);
     });
@@ -329,20 +225,72 @@ class Property<T extends Object> {
     }
   }
 
-  Widget map({
+  R match<R>({
+    required R Function(T value) onSome,
+    required R Function() onNone,
+    R Function()? onWaiting,
+    R Function()? onNullValue,
+    R Function()? onEmptyList,
+    R Function()? onEmptyMap,
+    R Function(T value)? onListening,
+    R Function(Object error, StackTrace stackTrace)? onError,
+    R Function()? onTimeout,
+    R Function()? onDebounce,
+    R Function()? onThrottle,
+    required R fallback,
+    bool skipWaiting = false,
+    bool skipDebounce = false,
+    bool skipThrottle = false,
+  }) {
+    switch (state) {
+      case PropertyState.some:
+        return value.match(() => fallback, (t) => onSome.call(t) ?? fallback);
+      case PropertyState.none:
+        return value.match(() => fallback, (t) => onNone.call() ?? fallback);
+      case PropertyState.waiting:
+        return value.match(
+            () => fallback, (t) => onWaiting?.call() ?? fallback);
+      case PropertyState.emptyList:
+        return value.match(
+            () => fallback, (t) => onEmptyList?.call() ?? fallback);
+      case PropertyState.emptyMap:
+        return value.match(
+            () => fallback, (t) => onEmptyMap?.call() ?? fallback);
+      case PropertyState.listening:
+        return value.match(
+            () => fallback, (t) => onListening?.call(t) ?? fallback);
+      case PropertyState.streamEvent:
+        return fallback;
+      case PropertyState.streamPaused:
+        return fallback;
+      case PropertyState.error:
+        return value.match(() => fallback,
+            (t) => onError?.call(t, StackTrace.fromString('')) ?? fallback);
+      case PropertyState.timeout:
+        return value.match(
+            () => fallback, (t) => onTimeout?.call() ?? fallback);
+      case PropertyState.debouncing:
+        return value.match(
+            () => fallback, (t) => onDebounce?.call() ?? fallback);
+      case PropertyState.throttled:
+        return value.match(
+            () => fallback, (t) => onThrottle?.call() ?? fallback);
+    }
+  }
+
+  Widget widget({
     required Widget Function(T value) onSome,
-    required Widget Function() onInit,
-    Widget Function()? onNone,
+    required Widget Function() onNone,
     Widget fallback = const SizedBox.shrink(),
-    Widget Function(T value)? onWaiting,
+    Widget Function()? onWaiting,
     Widget Function()? onNull,
     Widget Function()? onEmptyList,
     Widget Function()? onEmptyMap,
     Widget Function(T value)? onListening,
-    Widget Function(T value, Object error, StackTrace stackTrace)? onError,
-    Widget Function(T value)? onTimeout,
-    Widget Function(T value, int timeRemaining)? onDebounce,
-    Widget Function(T value, int timeRemaining)? onThrottle,
+    Widget Function(Object error, StackTrace stackTrace)? onError,
+    Widget Function()? onTimeout,
+    Widget Function()? onDebounce,
+    Widget Function()? onThrottle,
     bool skipWaiting = false,
     bool skipDebounce = false,
     bool skipThrottle = false,
@@ -350,58 +298,23 @@ class Property<T extends Object> {
     return PropertyWidget<Option<T>>(
       key: ValueKey(hashCode),
       property: this,
-      onValue: (Option<T> value) {
-        final result = value.fold<Widget>(
-          ifNone: onNone ?? (() => fallback),
-          ifSome: (T val) => onSome(val),
-        );
-        return result is Future<Widget>
-            ? FutureBuilder<Widget>(
-                future: result,
-                initialData: _lastSnapshot?.data ?? onInit.call(),
-                builder:
-                    (BuildContext context, AsyncSnapshot<Widget> snapshot) {
-                  _lastSnapshot = snapshot;
-                  if (_lastSnapshot == null) {
-                    return onInit.call();
-                  } else if (snapshot.connectionState == ConnectionState.done &&
-                      snapshot.data != null) {
-                    return snapshot.data!;
-                  } else {
-                    return _lastSnapshot!.data as Widget;
-                  }
-                },
-              )
-            : result;
-      },
-      onNull: onNone != null ? () => onNone() : () => fallback,
-      onInit: onInit != null
-          ? (Option<T> value) => onInit.call()
-          : (Option<T> value) => fallback,
-      onWaiting: onWaiting != null
-          ? (Option<T> value) => onWaiting(value.getOrElse(() => _defaultValue))
-          : null,
-      onEmptyList: onEmptyList != null ? () => onEmptyList() : null,
-      onEmptyMap: onEmptyMap != null ? () => onEmptyMap() : null,
-      onListening: onListening != null
-          ? (Option<T> value) =>
-              onListening(value.getOrElse(() => _defaultValue))
-          : null,
-      onError: onError != null
-          ? (Option<T> value, Object error, StackTrace stackTrace) =>
-              onError(value.getOrElse(() => _defaultValue), error, stackTrace)
-          : null,
-      onTimeout: onTimeout != null
-          ? (Option<T> value) => onTimeout(value.getOrElse(() => _defaultValue))
-          : null,
-      onDebounce: onDebounce != null
-          ? (Option<T> value, int timeRemaining) =>
-              onDebounce(value.getOrElse(() => _defaultValue), timeRemaining)
-          : null,
-      onThrottle: onThrottle != null
-          ? (Option<T> value, int timeRemaining) =>
-              onThrottle(value.getOrElse(() => _defaultValue), timeRemaining)
-          : null,
+      onSome: (value) => value.match(() => onNone(), (t) => onSome(t)),
+      onNone: () => onNone(),
+      onWaiting: (value) => value.match(() => onWaiting?.call() ?? fallback,
+          (t) => onWaiting?.call() ?? fallback),
+      onEmptyList: onEmptyList,
+      onEmptyMap: onEmptyMap,
+      onListening: (value) => value.match(() => onWaiting?.call() ?? fallback,
+          (t) => onListening?.call(t) ?? fallback),
+      onError: (value, error, stackTrace) => value.match(
+          () => onError?.call(error, stackTrace) ?? fallback,
+          (t) => onError?.call(error, stackTrace) ?? fallback),
+      onTimeout: (value) => value.match(() => onTimeout?.call() ?? fallback,
+          (t) => onTimeout?.call() ?? fallback),
+      onDebounce: (value) => value.match(() => onDebounce?.call() ?? fallback,
+          (t) => onDebounce?.call() ?? fallback),
+      onThrottle: (value) => value.match(() => onThrottle?.call() ?? fallback,
+          (t) => onThrottle?.call() ?? fallback),
       skipWaiting: skipWaiting,
       skipDebounce: skipDebounce,
       skipThrottle: skipThrottle,
@@ -411,7 +324,6 @@ class Property<T extends Object> {
   void on({
     required void Function(T value) onValue,
     void Function()? onNone,
-    void Function()? onInit,
     void Function(T value)? onWaiting,
     void Function()? onNull,
     void Function()? onEmptyList,
@@ -428,18 +340,8 @@ class Property<T extends Object> {
     PropertyState state = this.state;
 
     switch (state) {
-      case PropertyState.init:
-        if (onInit != null) {
-          onInit.call();
-        }
-        break;
-      case PropertyState.value:
+      case PropertyState.some:
         onValue(_value as T);
-        break;
-      case PropertyState.Null:
-        if (onNone != null) {
-          onNone.call();
-        }
         break;
       case PropertyState.waiting:
         if (!skipWaiting && onWaiting != null) {
@@ -491,10 +393,9 @@ class PropertyWidget<T extends Object> extends StatefulWidget {
   const PropertyWidget({
     Key? key,
     required this.property,
-    required this.onValue,
-    this.onInit,
+    required this.onSome,
+    required this.onNone,
     this.onWaiting,
-    this.onNull,
     this.onEmptyList,
     this.onEmptyMap,
     this.onListening,
@@ -508,30 +409,30 @@ class PropertyWidget<T extends Object> extends StatefulWidget {
   }) : super(key: key);
 
   final Property property;
-  final Widget Function()? onNull;
+  final Widget Function() onNone;
   final Widget Function()? onEmptyMap;
   final Widget Function()? onEmptyList;
-  final Widget Function(T value) onValue;
-  final Widget Function(T defaultValue)? onInit;
+  final Widget Function(T value) onSome;
   final Widget Function(T value)? onWaiting;
   final Widget Function(T value)? onListening;
   final Widget Function(T value, Object error, StackTrace stackTrace)? onError;
   final Widget Function(T value)? onTimeout;
-  final Widget Function(T value, int timeRemaining)? onDebounce;
-  final Widget Function(T value, int timeRemaining)? onThrottle;
+  final Widget Function(T value)? onDebounce;
+  final Widget Function(T value)? onThrottle;
   final bool skipWaiting;
   final bool skipDebounce;
   final bool skipThrottle;
 
   @override
-  _PropertyWidgetState<T> createState() => _PropertyWidgetState<T>();
+  PropertyWidgetState<T> createState() => PropertyWidgetState<T>();
 }
 
-class _PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
+class PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
   late StreamSubscription<PropertyEvent> _subscription;
 
   @override
   void initState() {
+    widget.property.initController();
     _subscription = widget.property.controller.stream.listen((event) {
       _onPropertyEvent(event);
     });
@@ -543,6 +444,7 @@ class _PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.property != widget.property) {
       _subscription.cancel();
+      widget.property.initController();
       _subscription = widget.property.controller.stream.listen((event) {
         _onPropertyEvent(event);
       });
@@ -567,6 +469,7 @@ class _PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
   void dispose() {
     _subscription.cancel();
     if (mounted) {
+      widget.property.resetOnDispose ? widget.property.resetToNone() : null;
       widget.property.dispose();
     }
     super.dispose();
@@ -581,16 +484,13 @@ class _PropertyWidgetState<T extends Object> extends State<PropertyWidget<T>> {
     Object? error = widget.property.error;
     StackTrace? stackTrace = widget.property.stackTrace;
 
-    if (state == PropertyState.init) {
-      widgetToBuild = widget.onInit?.call(widget.property.value as T) ??
-          const SizedBox.shrink();
-    } else if (state == PropertyState.value) {
-      widgetToBuild = widget.onValue.call(value);
-    } else if (state == PropertyState.waiting) {
+    if (state == PropertyState.waiting) {
       widgetToBuild = widget.onWaiting?.call(widget.property.value as T) ??
           const SizedBox.shrink();
-    } else if (state == PropertyState.Null) {
-      widgetToBuild = widget.onNull?.call() ?? const SizedBox.shrink();
+    } else if (state == PropertyState.some) {
+      widgetToBuild = widget.onSome.call(value);
+    } else if (state == PropertyState.none) {
+      widgetToBuild = widget.onNone.call();
     } else if (state == PropertyState.emptyList) {
       widgetToBuild = widget.onEmptyList?.call() ?? const SizedBox.shrink();
     } else if (state == PropertyState.emptyMap) {
